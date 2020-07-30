@@ -1,0 +1,381 @@
+---
+title: "Final Project"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load packages
+Clearing the workspace and load required packages. 
+
+```{r}
+rm(list = ls()) 
+library(DMwR)
+library(tidyverse)
+library(ggplot2)
+library(e1071) 
+library(mltools)
+library(data.table)
+library(gbm)
+library(pROC)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(dismo)
+library(dplyr)
+library(ggthemes)
+library(corrplot)
+```
+
+# Load data
+```{r}
+df=read.csv('WA_Fn-UseC_-HR-Employee-Attrition.csv')
+glimpse(df)
+head(df) 
+nrow(df)     
+ncol(df)       
+summary(df)   
+```
+
+# Exploratory Data Analysis
+```{r}
+summary(df$Attrition) 
+table(df$Attrition)     
+table(df$YearsAtCompany) 
+table(df$Attrition, df$YearsAtCompany)  
+```
+
+
+# Data Visualization
+```{r}
+ggplot(df, aes(factor(JobSatisfaction)))+
+  geom_bar(aes(fill = factor(Attrition)))
+
+ggplot(df, aes(x=JobSatisfaction)) +
+  geom_bar(aes(y = (..count..)/(length(df[df$JobSatisfaction==1,])), 
+               fill = Gender), stat="count")+
+  ylab("Percentage")
+
+ggplot(df,
+      aes(Age))+
+      geom_histogram(binwidth=5,aes(y=..count..),colour="green",fill="brown")+
+      labs(x="Age",y="Count",title="Age Distribution")
+
+ggplot(df, 
+  aes(x = MonthlyIncome, fill = Attrition)) + 
+  geom_density(alpha = 0.5) + 
+  theme_few()+
+  theme(legend.position="right", plot.title = element_text(hjust=0.5,size=12))+
+
+  scale_fill_manual(values = c("blue","yellow"))
+
+ggplot(df, 
+  aes(x = HourlyRate, fill = Attrition)) + 
+  geom_density(alpha = 0.5) + 
+  theme_few()+
+  theme(legend.position="right",plot.title = element_text(hjust=0.5,size=12))+
+  scale_fill_manual(values = c("blue","yellow"))
+
+ggplot(df, 
+  aes(x = DailyRate, fill = Attrition)) + 
+  geom_density(alpha = 0.5) + 
+  theme_few()+
+  theme(legend.position="right",plot.title = element_text(hjust=0.5,size=12))+
+  scale_fill_manual(values = c("blue","yellow"))
+
+
+ggplot(df, 
+  aes(y = YearsSinceLastPromotion, x = YearsAtCompany, color = OverTime)) + 
+  geom_jitter(size = 2, alpha = 0.5) + 
+  geom_smooth(method='glm') + 
+  facet_wrap(~ Attrition) + 
+  ggtitle("Attrition") + 
+  scale_colour_manual(values = c("black","yellow")) 
+
+ggplot(df, 
+        aes(x= WorkLifeBalance, y=DistanceFromHome, group = WorkLifeBalance, fill = WorkLifeBalance)) + 
+        geom_boxplot(alpha=0.5) + 
+        facet_wrap(~ Attrition) 
+
+ggplot(df, 
+        aes(x= BusinessTravel,  group=Attrition)) + 
+        geom_bar(aes(y = ..prop.., fill = factor(..x..)), 
+                   stat="count", 
+                   alpha = 0.6) +
+        labs(y = "Percentage", fill="Business Travel") +
+        facet_grid(~Attrition) +
+        scale_fill_manual(values = c("Green","Blue", "Yellow")) 
+
+```
+
+
+
+# Data cleaning 
+## Drop useless columns
+```{r}
+df <- subset(df, select = -c(EmployeeCount,
+                             EmployeeNumber,
+                             Over18,
+                             StandardHours))
+```
+
+## Oversample
+We cannot use undersample because the original dataset is too small.
+```{r}
+use_oversample = FALSE
+if (use_oversample){
+    df = SMOTE(Attrition~., df, perc.over = 540, 
+               perc.under = 100, k = 5)
+}
+```
+
+## MinMax Scaling
+```{r}
+scaler <- function(x){
+    return((x-min(x))/(max(x)-min(x)))
+}
+```
+
+## Create dummies
+```{r}
+clean <- function(original_df, scaling=T){
+    df_cleaned = copy(df)
+    # to binary
+    df_cleaned$Attrition = ifelse(df_cleaned$Attrition=='Yes', 1, 0)
+    df_cleaned$OverTime = ifelse(df_cleaned$OverTime=='Yes', 1, 0)
+    # to one-hot
+    dummy_columns = c('BusinessTravel',
+                      'Department',
+                      'EducationField',
+                      'Gender',
+                      'JobRole',
+                      'MaritalStatus')
+
+    df_to_one_hot = subset(df_cleaned, select = dummy_columns)
+    dummies = one_hot(data.table(df_to_one_hot))
+
+    # Drop the original columns
+    df_cleaned <- df_cleaned[, !colnames(df) %in% dummy_columns]
+    df_cleaned <- cbind(df_cleaned, dummies)
+    
+    for (i in seq(ncol(df_cleaned))){
+        if (nrow(unique(df_cleaned[i])) > 2){
+            df_cleaned[i] <- scaler(df_cleaned[i])
+        }
+    }
+    return(df_cleaned)
+}
+
+df_cleaned <- clean(df, TRUE)
+
+# check NA values
+for(i in lapply(df_cleaned,function(x){length(which(is.na(x)))})){
+    if (i != 0){
+        print(df_cleaned[, i])
+    }
+}
+```
+
+## Train-test split 
+### Train-test split Decision tree
+```{r}
+set.seed(100)  
+# By default, createDataPartition does a stratified random split of the data. We do a stratified split because the data is imbalanced.
+# 80% train, 20% test
+trainIndex <- createDataPartition(df$Attrition, p = .8, list = FALSE)
+train <- df[ trainIndex,]
+test  <- df[-trainIndex,]
+```
+
+### Train-test split for SVM and GBM
+Both of these models use the cleaned_df version of the dataset, which is normalized and has dummy variables.
+```{r}
+set.seed(100)  
+# By default, createDataPartition does a stratified random split of the data. We do a stratified split because the data is imbalanced.
+trainIndex <- createDataPartition(df$Attrition, p = .8, list = FALSE)
+train_cleaned <- df_cleaned[ trainIndex,]
+test_cleaned  <- df_cleaned[-trainIndex,]
+```
+
+# Models
+## (1) Decision Tree
+Decision tree uses the original dataset without dummy variables and normalization, since tree-based models do not require these steps.
+```{r}
+# build a model
+# 5-fold cross-validation
+set.seed(100)
+tree <-rpart(Attrition~., data=train, method="class",           
+                control=rpart.control(cp=0.01,maxdepth=5,xval=5))   
+rpart.plot(tree)
+print(tree)
+summary(tree)
+```
+
+### Hyperparameter tuning
+```{r}
+printcp(tree)
+plotcp(tree) 
+
+# prune the tree based on the smallest relative error
+best_tree <- prune(tree,cp=tree$cptable[which.min(tree$cptable[,'rel error']),'CP'])
+rpart.plot(best_tree)
+```
+
+### Performance
+```{r}
+train_pred_tree <- predict(best_tree, train, type="class")
+test_pred_tree <- predict(best_tree, test, type ='class')
+test_pred_tree_prob <- predict(best_tree, test)[,2]
+
+## Accuracy 
+mean(train$Attrition==train_pred_tree)  
+mean(test$Attrition==test_pred_tree)  
+
+## Confusion matrix
+table(train_pred_tree,train$Attrition, dnn=c("predicted","actual"))
+cm_tree = table(test_pred_tree,test$Attrition, dnn=c("predicted","actual"))
+cm_tree
+```
+
+```{r}
+get_scores <- function(cm){
+    TPR <- cm[4]/(cm[4] + cm[3])
+    TNR <- cm[1]/(cm[1] + cm[2])
+    PPV <- cm[4]/(cm[4] + cm[2])
+    FNR <- 1 - TPR
+    FPR <- 1- TNR
+    
+    print('The sensitivity rate is: ')
+    print(TPR)
+    print('The specificity rate is: ')
+    print(TNR)
+    print('The precision rate is: ', PPV)
+    print(PPV)
+    print('The miss rate is: ', FNR)
+    print(FNR)
+    print('The fall-out rate is: ', FPR)
+    print(FPR)
+}
+
+get_scores(cm_tree)
+```
+
+## (2) SVM
+### Hyperparameter tuning
+```{r}
+# grid search with 5-fold cv
+# tune three typer-parameters: gamma, cost, kernel
+# total 3 * 3 * 2  = 50 combinations; 5 fold per combination
+svm_tune <- tune(svm, Attrition~., data=train_cleaned,
+                 ranges = list(gamma = 2^(-1:1), 
+                               cost = 2^(2:4),
+                               kernel=c("radial", 'linear')),
+                 tunecontrol = tune.control(sampling = "cross",
+                                            cross=5))
+                                                 
+svm_tune
+best_svm_mod <- svm_tune$best.model
+
+svm_tune$best.performance
+hist(best_svm_mod$decision.values)
+```
+
+### Performance
+```{r}
+train_pred_svm = ifelse(predict(best_svm_mod)> 0.5, 1, 0)
+test_pred_svm_prob = predict(best_svm_mod, newdata = test_cleaned)
+test_pred_svm = ifelse(test_pred_svm_prob>0.5,1,0) 
+
+mean(train_pred_svm == train_cleaned$Attrition) # train set accuracy
+mean(test_pred_svm == test_cleaned$Attrition) # test set accuracy
+    
+# Confusion matrix for test set
+cm_svm = table(test_pred_svm, test_cleaned$Attrition, dnn=c("predicted","actual"))
+cm_svm
+```
+
+## (3) GBM
+### Hyperparameter tuning
+```{r}
+hyper_grid <- expand.grid(
+    shrinkage = c(.01, .1, .3),
+    interaction.depth = c(3, 5, 8),
+    n.minobsinnode = c(3, 5, 10))
+
+for(i in 1:nrow(hyper_grid)){
+    
+    gbm.tune <- gbm(
+    formula = Attrition ~ .,
+    distribution = "gaussian",
+    data = train_cleaned,
+    interaction.depth = hyper_grid$interaction.depth[i],
+    shrinkage = hyper_grid$shrinkage[i],
+    n.minobsinnode = hyper_grid$n.minobsinnode[i],
+    n.trees = 1000,
+    verbose = FALSE)
+    hyper_grid$optimal_trees[i] <- which.min(gbm.tune$train.error)
+}
+  
+hyper_grid <- hyper_grid %>% 
+  dplyr::arrange(optimal_trees)
+head(hyper_grid)
+```
+
+```{r}
+gbm_model <- gbm(
+    formula = Attrition ~ .,
+    distribution = "gaussian",
+    data = train_cleaned,
+    n.trees = 1000,
+    interaction.depth = hyper_grid$interaction.depth[1],
+    shrinkage = hyper_grid$shrinkage[1],
+    n.minobsinnode = hyper_grid$n.minobsinnode[1],
+    verbose = FALSE) 
+print(gbm_model)
+rel_inf <- summary(gbm_model)
+
+# plot relative influence
+rel_inf %>%
+  mutate(var = fct_reorder(var, rel.inf)) %>%
+    ggplot(aes(x=var, y=rel.inf)) + 
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    scale_fill_hue(c = 40) +
+    theme(legend.position="none")
+gbm.perf(gbm_model)
+```
+
+### Performance
+```{r}
+train_pred_gbm <- predict(gbm_model, n.trees=200, type = 'response')
+test_pred_gbm_prob <- predict(gbm_model, newdata=test_cleaned, n.trees=200, type='response')
+
+train_pred_gbm = ifelse(train_pred_gbm > 0.5, 1, 0)
+test_pred_gbm = ifelse(test_pred_gbm_prob > 0.5, 1, 0)
+
+mean(train_pred_gbm == train_cleaned$Attrition) # train set accuracy
+mean(test_pred_gbm == test_cleaned$Attrition) # test set accuracy
+
+# Confusion matrix for test set
+cm_gbm = table(test_pred_gbm, test_cleaned$Attrition, dnn=c("predicted","actual"))
+cm_gbm
+
+get_scores(cm_gbm)
+```
+
+# Performance Visualization with ROC
+```{r}
+tree_roc<-roc(as.numeric(test$Attrition),test_pred_tree_prob,auc=TRUE)
+svm_roc<-roc(test_cleaned$Attrition,test_pred_svm_prob,auc=TRUE)
+gbm_roc<-roc(test_cleaned$Attrition,test_pred_gbm_prob,auc=TRUE)
+
+plot(tree_roc,print.auc=TRUE,print.auc.y=.2, col="blue")
+plot(svm_roc,print.auc=TRUE,print.auc.y=.3, col="black",add=TRUE)
+plot(gbm_roc,print.auc=TRUE,print.auc.y=.4, col="red",add=TRUE)
+```
+
